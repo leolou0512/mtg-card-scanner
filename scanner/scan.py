@@ -1,10 +1,10 @@
-"""Scan Magic cards with a phone camera and log them.
+﻿"""Scan Magic cards with a phone camera and log them.
 
 The phone runs IP Webcam, which serves frames over HTTP. This polls the low
 resolution stream, waits until a card is placed and the image stops moving,
 then grabs one full resolution still, reads it, and appends it to the log.
 
-  python scan.py --url http://192.168.1.189:8080     live scanning
+  python scan.py --url http://192.168.1.100:8080     live scanning
   python scan.py --image photo.jpg                   test on one photo
   python scan.py --url ... --probe                   check the connection
   python scan.py --url ... --setup                   apply good camera settings

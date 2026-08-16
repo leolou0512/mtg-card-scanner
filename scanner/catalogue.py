@@ -1,4 +1,4 @@
-"""Interactive card cataloguer.
+﻿"""Interactive card cataloguer.
 
 Run it, type the phone's address, then feed cards under the camera one at a
 time. You press a key to shoot, then accept or reject what it read.
@@ -133,7 +133,7 @@ def normalise_url(raw):
 
 
 def ask_address(default=None):
-    prompt = f"Phone address [{default}]: " if default else "Phone address (e.g. 192.168.1.189): "
+    prompt = f"Phone address [{default}]: " if default else "Phone address (e.g. 192.168.1.100): "
     while True:
         raw = input(prompt).strip()
         if not raw and default:
@@ -143,7 +143,7 @@ def ask_address(default=None):
         url = normalise_url(raw)
         if url:
             return url
-        print("  not a valid address - try 192.168.1.189 or 192.168.1.189:8080")
+        print("  not a valid address - try 192.168.1.100 or 192.168.1.100:8080")
 
 
 # -------------------------------------------------------------------- logging

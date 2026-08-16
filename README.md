@@ -1,4 +1,4 @@
-# Card Cataloguer
+﻿# Card Cataloguer
 
 Scan Magic cards with a phone camera, identify them, and build a collection log.
 Runs on Windows and macOS from the same folder.
@@ -117,7 +117,7 @@ ignored and a sensible local default is chosen instead.
 
 Install **IP Webcam** (Android, free). Set photo resolution to maximum and
 focus mode to continuous, then scroll down and tap **Start server**. It shows an
-address like `http://192.168.1.189:8080`.
+address like `http://192.168.1.100:8080`.
 
 Phone and computer must be on the same WiFi.
 
