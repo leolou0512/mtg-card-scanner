@@ -189,6 +189,42 @@ class ArtIndex:
             out.append((code.upper(), num, int(d[i])))
         return out
 
+    def rank_printings(self, card_img, printings, limit=24):
+        """Order a known card's printings by how well each matches the photo.
+
+        This hashes the *whole card*, not just the art window, which is the
+        opposite of what identification wants. Identification ignores the frame
+        so that a photo matches whatever the reference looks like; but printings
+        of one card frequently share the same artwork and differ only in the
+        frame - borderless, extended, showcase - so the frame is precisely the
+        signal here. Measured on Starfield Shepherd EOE#37 vs EOE#393: art alone
+        cannot separate them at all (gap 0), whole-card separates them by 13.
+
+        Only a handful of images per card, so they are hashed on demand rather
+        than kept in the index.
+
+        Returns [(setcode, number, distance)] closest first; printings with no
+        cached image are left out.
+        """
+        if not printings:
+            return []
+        q = phash(card_img)
+        rows, meta = [], []
+        for p in printings[:limit]:
+            code, num = p[0], p[1]
+            im = (scryfall.cached_only(code, num, "large")
+                  or scryfall.cached_only(code, num, "small"))
+            if im is None:
+                continue
+            rows.append(phash(im))
+            meta.append((code, num))
+        if not rows:
+            return []
+        d = hamming_all(q, np.array(rows, dtype=np.uint8))
+        out = [(meta[j][0], meta[j][1], int(d[j])) for j in range(len(meta))]
+        out.sort(key=lambda t: t[2])
+        return out
+
     def confident(self, results):
         """Is the best artwork match trustworthy on its own?
 

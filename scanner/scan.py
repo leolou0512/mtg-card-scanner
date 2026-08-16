@@ -305,6 +305,13 @@ def ocr_image_lang(img, ocr, tmpdir, lang):
 
 ART_FALLBACK_SCORE = 0.90     # try artwork when the text is less sure than this
 
+# Choosing between printings of a known card is an easier problem than
+# identifying the card, so these are looser than the whole-index thresholds -
+# but a clear gap is still required, since reprints often share artwork and
+# then no amount of looking will separate them.
+ART_PRINTING_MAX = 18
+ART_PRINTING_GAP = 4
+
 _art_index = [None, False]    # cached index, and whether we already tried
 
 
@@ -318,6 +325,28 @@ def art_index():
         except Exception:
             _art_index[0] = None
     return _art_index[0]
+
+
+def rank_printings_by_art(full, box, rotated, card):
+    """Order this card's printings by how well each one's art matches the photo.
+
+    Without it the first printing wins by default, which is wrong whenever a
+    card exists in several treatments - and those variants are usually the ones
+    where the price differs most.
+    """
+    idx = art_index()
+    if idx is None or not card:
+        return []
+    prints = card.get("printings") or []
+    if len(prints) < 2:
+        return []
+    try:
+        view = full.crop(box)
+        if rotated:
+            view = view.transpose(Image.ROTATE_180)
+        return idx.rank_printings(view, prints)
+    except Exception:
+        return []
 
 
 def art_match(full, box, rotated, index):
@@ -539,6 +568,21 @@ def recognise(img, ocr, index, tmpdir, verbose=False):
                 info["resolved_by"] = "artwork"
                 if not number and art.get("setcode"):
                     number, setcode = art["number"], art["setcode"]
+
+    # With no collector number the printing would otherwise be whichever came
+    # first alphabetically. Let the artwork choose instead.
+    if guess and box and not number:
+        ranked = rank_printings_by_art(full, box, info.get("rotated"),
+                                       guess["card"])
+        if ranked:
+            info["art_printings"] = ranked
+            best_code, best_num, dist = ranked[0]
+            runner = ranked[1][2] if len(ranked) > 1 else 64
+            # only when the winner is both close and clearly ahead
+            if dist <= ART_PRINTING_MAX and (runner - dist) >= ART_PRINTING_GAP:
+                setcode, number = best_code, best_num
+                info["printing_by"] = "artwork"
+                info["printing_distance"] = dist
 
     language = parse_language(info.get("collector_lines") or info.get("name_lines") or [])
     info.update(number=number, setcode=setcode, rarity=rarity, language=language)

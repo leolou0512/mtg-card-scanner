@@ -1,4 +1,4 @@
-"""Card cataloguer with a graphical interface.
+﻿"""Card cataloguer with a graphical interface.
 
 Live camera on the left, the card Scryfall thinks it is on the right, so you
 verify by looking rather than by reading. Mouse first, with keyboard shortcuts
@@ -59,6 +59,8 @@ BAD = "#ff6b6b"
 CARD_W, CARD_H = 400, 558        # reference pane, 63x88 proportions
 VIDEO_W, VIDEO_H = 400, 558      # matched, so the two cards compare directly
 REF_VERSION = "large"            # 672x936 from Scryfall, sharper than 'normal'
+PRINT_W, PRINT_H = 74, 103       # printing thumbnails, same proportions
+MAX_PRINT_TILES = 4              # as many as fit the column without scrolling
 
 
 # --------------------------------------------------------------------- config
@@ -405,6 +407,12 @@ class App(tk.Tk):
         chold.pack(padx=10, pady=(0, 10))
         self.card_lbl = tk.Label(chold, bg="#0d0f13", text="press SCAN", fg=MUTED)
         self.card_lbl.pack(expand=True)
+        # which printing is showing, laid over the bottom of the image itself
+        self.card_overlay = tk.Label(chold, text="", bg="#0d0f13", fg=FG,
+                                     font=(UI_FONT, 10, "bold"), anchor="w",
+                                     padx=8, pady=4)
+        self.card_overlay.place(relx=0, rely=1.0, relwidth=1.0, anchor="sw")
+        self.card_overlay.lower()
 
         # details
         det = tk.Frame(top, bg=BG)
@@ -433,8 +441,19 @@ class App(tk.Tk):
                                  wraplength=330, justify="left")
         self.warn_lbl.pack(fill="x", pady=(8, 0))
 
+        # Printings live here rather than in a pop-up window: they are part of
+        # verifying the card, so they belong on screen beside it.
+        self.print_head = tk.Label(det, text="", bg=BG, fg=MUTED,
+                                   font=(UI_FONT, 9, "bold"), anchor="w")
+        self.print_head.pack(fill="x", pady=(12, 2))
+        self.print_strip = tk.Frame(det, bg=BG, height=PRINT_H + 22)
+        self.print_strip.pack(fill="x")
+        self.print_strip.pack_propagate(False)
+        self._print_tiles = []
+        self._print_photos = []
+
         opts = tk.Frame(det, bg=BG)
-        opts.pack(fill="x", pady=(14, 0))
+        opts.pack(fill="x", pady=(10, 0))
 
         # big foil toggle - the state has to be readable at a glance
         self.foil_btn = tk.Button(
@@ -459,15 +478,6 @@ class App(tk.Tk):
                   activebackground=EDGE, activeforeground=FG).pack(side="left")
         tk.Label(opts, text="quantity  -  or press 1-9", bg=BG, fg=MUTED,
                  font=(UI_FONT, 8)).pack(anchor="w")
-
-        self.print_btn = tk.Button(opts, text="CHANGE PRINTING  (P)",
-                                   command=self.open_picker, bg=PANEL, fg=FG,
-                                   relief="flat", pady=14,
-                                   font=(UI_FONT, 13, "bold"),
-                                   activebackground=EDGE, activeforeground=FG,
-                                   disabledforeground="#4a505c",
-                                   state="disabled")
-        self.print_btn.pack(fill="x", pady=(10, 0))
 
         # Actions sit directly under the controls they follow, so the mouse
         # never leaves this column: adjust foil or quantity, then accept.
@@ -532,6 +542,117 @@ class App(tk.Tk):
     def _refresh_qty(self):
         self.qty_lbl.configure(text=str(self.qty.get()))
 
+    # ------------------------------------------------- printings, shown inline
+    def _clear_printings(self):
+        for w in self.print_strip.winfo_children():
+            w.destroy()
+        self._print_tiles = []
+        self._print_photos = []
+        self.print_head.configure(text="")
+
+    def _refresh_printings(self):
+        """Show every printing of the current card as a clickable thumbnail.
+
+        Ordered by how well the artwork matches the photo when that is known,
+        so the most likely printing is first rather than whichever happens to
+        sort first alphabetically.
+        """
+        self._clear_printings()
+        card = self.card
+        prints = (card.get("printings") or []) if card else []
+        if len(prints) < 2:
+            return
+
+        ranked = (self.info or {}).get("art_printings") or []
+        if ranked:
+            order = {(c.upper(), n): d for c, n, d in ranked}
+            prints = sorted(prints,
+                            key=lambda p: order.get((p[0].upper(), p[1]), 999))
+
+        by_art = self.info.get("printing_by") == "artwork"
+        self.print_head.configure(
+            text=f"{len(prints)} PRINTINGS   "
+                 + ("chosen by artwork - click to change"
+                    if by_art else "click to choose"))
+
+        row = tk.Frame(self.print_strip, bg=BG)
+        row.pack(fill="both", expand=True)
+        for i, pr in enumerate(prints[:MAX_PRINT_TILES]):
+            self._add_printing_tile(row, i, pr, ranked)
+        if len(prints) > MAX_PRINT_TILES:
+            tk.Label(row, text=f"+{len(prints)-MAX_PRINT_TILES}", bg=BG,
+                     fg=MUTED, font=(UI_FONT, 9)).pack(side="left", padx=4)
+
+        threading.Thread(target=self._load_printing_thumbs,
+                         args=(prints[:MAX_PRINT_TILES],), daemon=True).start()
+
+    def _add_printing_tile(self, parent, i, pr, ranked):
+        code, num, _rarity = pr
+        chosen = (code, num) == (self.printing[0], self.printing[1])
+        cell = tk.Frame(parent, bg=ACCENT if chosen else EDGE, padx=2, pady=2)
+        cell.pack(side="left", padx=(0, 4))
+        inner = tk.Frame(cell, bg=PANEL)
+        inner.pack()
+        hold = tk.Frame(inner, width=PRINT_W, height=PRINT_H, bg=PANEL)
+        hold.pack_propagate(False)
+        hold.pack()
+        lbl = tk.Label(hold, bg=PANEL, text="...", fg=MUTED, font=(UI_FONT, 8))
+        lbl.pack(expand=True)
+        dist = next((d for c, n, d in ranked
+                     if (c.upper(), n) == (code.upper(), num)), None)
+        caption = f"#{num}" + ("" if dist is None else f"  {dist}")
+        tk.Label(inner, text=caption[:12], bg=PANEL,
+                 fg=FG if chosen else MUTED,
+                 font=(UI_FONT, 8, "bold" if chosen else "normal")).pack(fill="x")
+        for w in (cell, inner, hold, lbl):
+            w.bind("<Button-1>", lambda e, p=pr: self._choose_printing(p))
+        self._print_tiles.append(lbl)
+
+    def _load_printing_thumbs(self, prints):
+        for i, (code, num, _r) in enumerate(prints):
+            im = scryfall.card_image(code, num, version="small")
+            if im is not None:
+                self.results.put(("thumb", (i, fit(im, PRINT_W, PRINT_H))))
+
+    def _on_thumb(self, payload):
+        i, im = payload
+        if i >= len(self._print_tiles) or im is None:
+            return
+        lbl = self._print_tiles[i]
+        if not lbl.winfo_exists():
+            return
+        photo = ImageTk.PhotoImage(im)
+        self._print_photos.append(photo)
+        lbl.configure(image=photo, text="")
+
+    def _choose_printing(self, pr):
+        self.printing = pr
+        self.confirmed = True
+        self.data = None
+        self._refresh_details()
+        self._refresh_printings()
+        self._load_card_visual()
+
+    def _refresh_overlay(self):
+        code, num, _r = self.printing
+        if not self.card or not code:
+            self.card_overlay.configure(text="")
+            self.card_overlay.lower()
+            return
+        prints = self.card.get("printings") or []
+        extra = ""
+        if len(prints) > 1:
+            pos = next((i + 1 for i, p in enumerate(prints)
+                        if (p[0], p[1]) == (code, num)), None)
+            extra = f"   ({pos} of {len(prints)} printings)" if pos else \
+                    f"   ({len(prints)} printings)"
+        by = self.info.get("printing_by")
+        tag = "  - by artwork" if by == "artwork" else ""
+        self.card_overlay.configure(
+            text=f"{code} #{num}{extra}{tag}",
+            bg="#0d0f13", fg=ACCENT if by == "artwork" else FG)
+        self.card_overlay.lift()
+
     def _refresh_foil_btn(self):
         on = self.foil.get()
         self.foil_btn.configure(
@@ -554,7 +675,7 @@ class App(tk.Tk):
         self.bind("r", lambda e: self.do_reject())
         self.bind("t", lambda e: self.do_retry())
         self.bind("e", lambda e: self.do_edit_last())
-        self.bind("p", lambda e: self.open_picker())
+        self.bind("p", lambda e: self.cycle_printing())
         self.bind("f", lambda e: self._toggle_foil())
         self.bind("q", lambda e: self._quit())
         for n in range(1, 10):
@@ -607,6 +728,8 @@ class App(tk.Tk):
                         self._on_card_image(payload)
                     elif kind == "data":
                         self._on_card_data(payload)
+                    elif kind == "thumb":
+                        self._on_thumb(payload)
                     elif kind == "carddb":
                         self._on_carddb(payload)
             except queue.Empty:
@@ -731,6 +854,7 @@ class App(tk.Tk):
                                            info.get("setcode"))
         self._set_buttons(scanned=True, matched=True)
         self._refresh_details()
+        self._refresh_printings()
         self._load_card_visual()
 
     def _load_card_visual(self):
@@ -818,37 +942,37 @@ class App(tk.Tk):
 
         warn = []
         prints = card.get("printings") or []
-        if len(prints) > 1 and not info.get("number") and not self.confirmed:
-            warn.append(f"Printing is a guess - {len(prints)} exist, press P")
+        # only really a guess when neither the collector line nor the artwork
+        # settled it and you have not picked one yourself
+        undecided = (len(prints) > 1 and not info.get("number")
+                     and info.get("printing_by") != "artwork"
+                     and not self.confirmed)
+        if undecided:
+            warn.append(f"Printing not certain - {len(prints)} exist, "
+                        f"pick one below")
         if self.foil.get() and fin and "foil" not in fin:
             warn.append("Scryfall says this printing has no foil version")
         self.warn_lbl.configure(text="\n".join(warn))
-
-        self.print_btn.configure(state="normal" if len(prints) > 1 else "disabled")
+        self._refresh_overlay()
 
     def _set_buttons(self, scanned, matched=False):
         self.accept_btn.configure(state="normal" if matched else "disabled")
         self.reject_btn.configure(state="normal" if scanned else "disabled")
         self.retry_btn.configure(state="normal" if scanned else "disabled")
-        if not matched:
-            self.print_btn.configure(state="disabled")
 
     def _update_counts(self):
         self.count_lbl.configure(
             text=f"accepted {self.accepted}    rejected {self.rejected}")
 
     # --------------------------------------------------------------- printing
-    def open_picker(self):
-        if not self.card or len(self.card.get("printings") or []) < 2:
+    def cycle_printing(self):
+        """Keyboard route to the next printing, since there is no button now."""
+        prints = (self.card.get("printings") or []) if self.card else []
+        if len(prints) < 2:
             return
-        PrintingPicker(self, self.index, self.card, self.printing, self._picked)
-
-    def _picked(self, pr):
-        self.printing = pr
-        self.confirmed = True
-        self.data = None
-        self._refresh_details()
-        self._load_card_visual()
+        cur = next((i for i, p in enumerate(prints)
+                    if (p[0], p[1]) == (self.printing[0], self.printing[1])), -1)
+        self._choose_printing(prints[(cur + 1) % len(prints)])
 
     # ---------------------------------------------------------------- actions
     def do_accept(self):
@@ -911,6 +1035,9 @@ class App(tk.Tk):
         self.price_lbl.configure(text="")
         self.conf_lbl.configure(text="")
         self.warn_lbl.configure(text="")
+        self.card_overlay.configure(text="")
+        self.card_overlay.lower()
+        self._clear_printings()
         self._set_buttons(scanned=False)
 
     def do_update_carddb(self):
