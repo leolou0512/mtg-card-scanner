@@ -469,23 +469,38 @@ class App(tk.Tk):
                                    state="disabled")
         self.print_btn.pack(fill="x", pady=(10, 0))
 
-        # actions
-        act = tk.Frame(self, bg=BG)
-        act.pack(fill="x", padx=12, pady=(4, 6))
-        self.scan_btn = self._button(act, "SCAN  (Space)", self.do_scan, ACCENT, 16)
-        self.scan_btn.pack(side="left")
-        self.accept_btn = self._button(act, "Accept  (A)", self.do_accept, OK, 12)
-        self.accept_btn.pack(side="left", padx=(2, 0))
-        self.retry_btn = self._button(act, "Retry  (T)", self.do_retry, WARN, 12)
-        self.retry_btn.pack(side="left", padx=(2, 0))
-        self.reject_btn = self._button(act, "Reject  (R)", self.do_reject, BAD, 12)
-        self.reject_btn.pack(side="left", padx=(2, 0))
-        self._button(act, "Edit last  (E)", self.do_edit_last, PANEL, 10).pack(
-            side="left", padx=(10, 0))
-        self.update_btn = self._button(act, "Update card database",
+        # Actions sit directly under the controls they follow, so the mouse
+        # never leaves this column: adjust foil or quantity, then accept.
+        tk.Frame(opts, bg=EDGE, height=1).pack(fill="x", pady=(14, 10))
+
+        self.scan_btn = self._button(opts, "SCAN   (Space)", self.do_scan,
+                                     ACCENT, 10)
+        self.scan_btn.pack(fill="x", ipady=6)
+
+        decide = tk.Frame(opts, bg=BG)
+        decide.pack(fill="x", pady=(6, 0))
+        decide.grid_columnconfigure(0, weight=1)
+        decide.grid_columnconfigure(1, weight=1)
+        self.accept_btn = self._button(decide, "Accept  (A)", self.do_accept,
+                                       OK, 8)
+        self.accept_btn.grid(row=0, column=0, sticky="ew", padx=(0, 3), ipady=4)
+        self.reject_btn = self._button(decide, "Reject  (R)", self.do_reject,
+                                       BAD, 8)
+        self.reject_btn.grid(row=0, column=1, sticky="ew", padx=(3, 0), ipady=4)
+        self.retry_btn = self._button(decide, "Retry  (T)", self.do_retry,
+                                      WARN, 8)
+        self.retry_btn.grid(row=1, column=0, sticky="ew", padx=(0, 3),
+                            pady=(6, 0), ipady=4)
+        self._button(decide, "Edit last  (E)", self.do_edit_last, PANEL, 8).grid(
+            row=1, column=1, sticky="ew", padx=(3, 0), pady=(6, 0), ipady=4)
+
+        # secondary, kept out of the way of the scanning rhythm
+        foot = tk.Frame(self, bg=BG)
+        foot.pack(fill="x", padx=12, pady=(2, 4))
+        self.update_btn = self._button(foot, "Update card database",
                                        self.do_update_carddb, PANEL, 10)
-        self.update_btn.pack(side="left", padx=(10, 0))
-        self.count_lbl = tk.Label(act, text="", bg=BG, fg=MUTED,
+        self.update_btn.pack(side="left")
+        self.count_lbl = tk.Label(foot, text="", bg=BG, fg=MUTED,
                                   font=(UI_FONT, 11))
         self.count_lbl.pack(side="right")
 
@@ -1110,8 +1125,11 @@ class Connect(tk.Tk):
         tk.Label(self, text="Open IP Webcam on the phone and tap 'Start server'.",
                  bg=BG, fg=MUTED, font=(UI_FONT, 9)).pack(padx=24)
 
-        prefix = (default.rsplit(".", 1)[0] + "."
-                  if default and default.count(".") == 3 else local_subnets()[0])
+        # the prefix comes from the host alone; the port is kept for the
+        # "last used" shortcut, since the phone does not always pick 8080
+        host = (default or "").split(":", 1)[0]
+        prefix = (host.rsplit(".", 1)[0] + "."
+                  if host.count(".") == 3 else local_subnets()[0])
 
         self.entry = tk.Entry(self, font=(MONO_FONT, 15), bg=PANEL, fg=FG,
                               insertbackground=FG, relief="flat", justify="center")
@@ -1233,7 +1251,9 @@ class Connect(tk.Tk):
 
 def main():
     cfg = load_config()
-    last = (cfg.get("url") or "").replace("http://", "").replace(":8080", "")
+    # keep the port: stripping it makes "last used" quietly wrong whenever the
+    # phone picks something other than 8080
+    last = re.sub(r"^https?://", "", cfg.get("url") or "").rstrip("/")
     dlg = Connect(last)
     dlg.mainloop()
     if not dlg.url:
