@@ -95,6 +95,47 @@ def detect(img, work_width=500):
     return (int(x0 * inv), int(y0 * inv), int(x1 * inv), int(y1 * inv))
 
 
+# Where artwork and the rules panel sit on a standard frame, as fractions of
+# card height. Artwork is a picture; the rules panel is a near-uniform light
+# background with text on it.
+ART_BAND = (0.12, 0.45)
+TEXT_BAND = (0.58, 0.88)
+
+
+def _colourfulness(img):
+    """How varied is this region? Artwork scores high, a text panel low."""
+    a = np.asarray(img.convert("RGB"), dtype=np.float32)
+    r, g, b = a[..., 0], a[..., 1], a[..., 2]
+    rg = r - g
+    yb = 0.5 * (r + g) - b
+    return float(np.sqrt(rg.std() ** 2 + yb.std() ** 2)
+                 + 0.3 * np.sqrt(rg.mean() ** 2 + yb.mean() ** 2))
+
+
+def upright_score(card_img):
+    """How strongly this looks like a card the right way up.
+
+    Positive means artwork sits above rules text, so the card is upright;
+    negative means it is a half-turn out. The outline cannot answer this - a
+    rectangle looks identical either way - but the printed layout is strongly
+    asymmetric. Unlike reading the name this works whatever language the card
+    is in, and on older cards that carry no collector line at all.
+
+    Across English, Chinese and borderless cards this gave the correct sign
+    every time. Margins are widest on ordinary frames and narrowest on
+    borderless ones, where artwork runs behind the text as well.
+    """
+    def band(lo, hi):
+        w, h = card_img.size
+        return card_img.crop((int(w * 0.10), int(h * lo),
+                              int(w * 0.90), int(h * hi)))
+
+    try:
+        return _colourfulness(band(*ART_BAND)) - _colourfulness(band(*TEXT_BAND))
+    except Exception:
+        return 0.0
+
+
 def regions(box):
     """Given a card box, return the name-bar and collector-line crops."""
     x0, y0, x1, y1 = box

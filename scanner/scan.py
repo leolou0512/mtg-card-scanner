@@ -291,9 +291,25 @@ def read_name(card_img, ocr, index, tmpdir, info=None):
     if best["score"] >= NAME_TRUST:
         return best
 
-    # Nothing convincing in English. The name may be in another script, so try
-    # every orientation again with the other recognisers - including the one
-    # the English pass scored lowest, which is often the right way up.
+    # Nothing convincing in English, so settle orientation without relying on
+    # text. The card's own layout answers it - artwork above, rules panel below
+    # - which holds in any language and on old cards with no collector line.
+    upright = orientation_from_layout(attempts)
+    if upright is None:
+        # borderless art can make the layout signal faint; the collector line
+        # is a second opinion, printed in Latin script whatever the language
+        upright = orientation_from_collector(attempts, ocr, tmpdir)
+        if upright is not None and info is not None:
+            info["rotation_by"] = "collector line"
+    elif info is not None:
+        info["rotation_by"] = "card layout"
+
+    if upright is not None:
+        attempts = [upright]
+
+    # The name may be in another script, so try the surviving orientations with
+    # the other recognisers - including the one English scored lowest, which is
+    # often the right way up.
     for attempt in attempts:
         foreign = try_foreign_name(attempt["view"], ocr, index, tmpdir)
         if foreign and foreign["score"] > best["score"]:
@@ -302,7 +318,51 @@ def read_name(card_img, ocr, index, tmpdir, info=None):
             if info is not None:
                 info["resolved_by"] = "localised name"
                 info["language"] = foreign.get("language")
+    if upright is not None and best["rot"] != upright["rot"]:
+        # trust the collector line over a weak name match
+        best = dict(upright, score=best["score"], guess=best["guess"])
     return best
+
+
+# How much clearer one orientation must look than the other before the layout
+# alone decides it. Borderless cards sit near zero, and those fall through to
+# the collector line instead of being guessed at.
+LAYOUT_MARGIN = 1.5
+
+
+def orientation_from_layout(attempts):
+    """Choose the orientation whose layout looks like a card the right way up.
+
+    Needs no text at all, so it works on any language and on cards too old to
+    carry a collector number.
+    """
+    if len(attempts) < 2:
+        return attempts[0] if attempts else None
+    scored = [(carddetect.upright_score(a["view"]), a) for a in attempts]
+    scored.sort(key=lambda t: -t[0])
+    top, second = scored[0], scored[1]
+    if top[0] - second[0] < LAYOUT_MARGIN or top[0] <= 0:
+        return None
+    return top[1]
+
+
+def orientation_from_collector(attempts, ocr, tmpdir):
+    """Pick the orientation whose collector line actually parses.
+
+    A card the wrong way up puts its collector line at the top, upside down,
+    where it reads as nothing usable. Requiring both a set code and a number
+    keeps stray digits from voting.
+    """
+    scored = []
+    for attempt in attempts:
+        try:
+            number, setcode, _rarity, _lines = read_collector_line(
+                attempt["view"], ocr, tmpdir)
+        except Exception:
+            continue
+        if number and setcode:
+            scored.append(attempt)
+    return scored[0] if len(scored) == 1 else None
 
 
 def try_foreign_name(view, ocr, index, tmpdir):

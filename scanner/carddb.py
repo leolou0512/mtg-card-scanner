@@ -152,12 +152,22 @@ def build(progress=print, keep_source=False):
     prices = {}
     tokens = set()
     body = {}
+    skipped_digital = 0
     for c in records:
         name = c.get("name")
         code = (c.get("set") or "").upper()
         num = c.get("collector_number") or ""
         if not name or not code or not num:
             continue
+
+        # Arena and Magic Online printings have no physical card, so they can
+        # never be the thing under the camera. Including them only pads the
+        # printing list with versions that cannot be owned on paper.
+        games = c.get("games") or []
+        if games and "paper" not in games:
+            skipped_digital += 1
+            continue
+
         layout = c.get("layout") or ""
         is_token = layout in SKIP_LAYOUTS
         rarity = c.get("rarity") or ""
@@ -238,6 +248,8 @@ def build(progress=print, keep_source=False):
     with open(VERSION_FILE(), "w", encoding="utf-8") as fh:
         json.dump(version, fh, indent=2)
 
+    progress(f"  skipped {skipped_digital} digital-only printings "
+             f"(Arena / Magic Online)")
     progress(f"  built {version['cards']} names, {version['printings']} printings")
     progress(f"  index:  {paths.INDEX}")
     progress(f"  prices: {scryfall.bulk_path()}")
