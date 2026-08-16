@@ -60,7 +60,8 @@ CARD_W, CARD_H = 400, 558        # reference pane, 63x88 proportions
 VIDEO_W, VIDEO_H = 400, 558      # matched, so the two cards compare directly
 REF_VERSION = "large"            # 672x936 from Scryfall, sharper than 'normal'
 PRINT_W, PRINT_H = 74, 103       # printing thumbnails, same proportions
-MAX_PRINT_TILES = 4              # as many as fit the column without scrolling
+PRINT_COLS = 4                   # fits the details column
+PRINT_ROWS = 2                   # visible without scrolling; more scroll
 
 
 # --------------------------------------------------------------------- config
@@ -196,135 +197,6 @@ def placeholder(w, h, text, colour=EDGE):
     return im
 
 
-# ------------------------------------------------------------- printing picker
-
-class PrintingPicker(tk.Toplevel):
-    """All printings of a card, as images, click to choose."""
-
-    THUMB_W, THUMB_H = 176, 245
-    COLS = 5
-
-    def __init__(self, parent, index, card, current, on_pick):
-        super().__init__(parent)
-        self.title(f"Printings of {card['name']}")
-        self.configure(bg=BG)
-        self.index = index
-        self.card = card
-        self.on_pick = on_pick
-        self.current = current
-        self._photos = []
-        self._tiles = {}
-        self.result = None
-
-        prints = card.get("printings") or []
-        head = tk.Frame(self, bg=BG)
-        head.pack(fill="x", padx=14, pady=(12, 6))
-        tk.Label(head, text=card["name"], bg=BG, fg=FG,
-                 font=(UI_FONT, 15, "bold")).pack(side="left")
-        tk.Label(head, text=f"   {len(prints)} printings - click one, or press 1-9",
-                 bg=BG, fg=MUTED, font=(UI_FONT, 10)).pack(side="left")
-
-        wrap = tk.Frame(self, bg=BG)
-        wrap.pack(fill="both", expand=True, padx=10, pady=6)
-        canvas = tk.Canvas(wrap, bg=BG, highlightthickness=0)
-        vbar = ttk.Scrollbar(wrap, orient="vertical", command=canvas.yview)
-        self.inner = tk.Frame(canvas, bg=BG)
-        self.inner.bind("<Configure>",
-                        lambda e: canvas.configure(scrollregion=canvas.bbox("all")))
-        canvas.create_window((0, 0), window=self.inner, anchor="nw")
-        canvas.configure(yscrollcommand=vbar.set)
-        canvas.pack(side="left", fill="both", expand=True)
-        vbar.pack(side="right", fill="y")
-        canvas.bind_all("<MouseWheel>",
-                        lambda e: canvas.yview_scroll(int(-e.delta / 120), "units"))
-
-        for i, pr in enumerate(prints):
-            self._add_tile(i, pr)
-
-        foot = tk.Frame(self, bg=BG)
-        foot.pack(fill="x", padx=14, pady=(4, 12))
-        tk.Button(foot, text="Cancel  (Esc)", command=self.destroy,
-                  bg=PANEL, fg=FG, relief="flat", padx=14, pady=6,
-                  activebackground=EDGE, activeforeground=FG).pack(side="right")
-
-        self.bind("<Escape>", lambda e: self.destroy())
-        for n in range(1, 10):
-            self.bind(str(n), lambda e, n=n: self._pick_index(n - 1))
-
-        self.transient(parent)
-        self.grab_set()
-        self.geometry(self._geometry_for(len(prints)))
-        threading.Thread(target=self._load_images, args=(prints,), daemon=True).start()
-
-    def _geometry_for(self, n):
-        cols = min(self.COLS, max(1, n))
-        rows = min(3, (n + cols - 1) // cols)
-        w = cols * (self.THUMB_W + 16) + 40
-        h = rows * (self.THUMB_H + 54) + 120
-        return f"{w}x{h}"
-
-    def _add_tile(self, i, pr):
-        code, num, rarity = pr
-        col, row = i % self.COLS, i // self.COLS
-        is_current = (code, num) == (self.current[0], self.current[1])
-
-        cell = tk.Frame(self.inner, bg=ACCENT if is_current else BG,
-                        padx=2, pady=2)
-        cell.grid(row=row, column=col, padx=6, pady=6)
-        inner = tk.Frame(cell, bg=PANEL)
-        inner.pack()
-
-        # fixed-pixel holder: a Label sizes in characters while it holds text
-        hold = tk.Frame(inner, width=self.THUMB_W, height=self.THUMB_H, bg=PANEL)
-        hold.pack_propagate(False)
-        hold.pack()
-        img_lbl = tk.Label(hold, bg=PANEL, text="loading...", fg=MUTED,
-                           font=(UI_FONT, 9))
-        img_lbl.pack(expand=True)
-        cap = f"{code} #{num}"
-        if i < 9:
-            cap = f"[{i+1}]  " + cap
-        tk.Label(inner, text=cap, bg=PANEL, fg=FG,
-                 font=(UI_FONT, 9, "bold")).pack(fill="x")
-        tk.Label(inner, text=self.index.set_name(code)[:26], bg=PANEL, fg=MUTED,
-                 font=(UI_FONT, 8)).pack(fill="x", pady=(0, 4))
-
-        for w in (cell, inner, img_lbl):
-            w.bind("<Button-1>", lambda e, p=pr: self._choose(p))
-        self._tiles[i] = img_lbl
-
-    def _load_images(self, prints):
-        for i, (code, num, _r) in enumerate(prints):
-            im = scryfall.card_image(code, num, version="small")
-            if im is None:
-                self.after(0, self._no_image, i)
-                continue
-            self.after(0, self._set_image, i, fit(im, self.THUMB_W, self.THUMB_H))
-
-    def _set_image(self, i, im):
-        lbl = self._tiles.get(i)
-        if not lbl or not lbl.winfo_exists():
-            return
-        photo = ImageTk.PhotoImage(im)
-        self._photos.append(photo)
-        lbl.configure(image=photo, text="")
-
-    def _no_image(self, i):
-        lbl = self._tiles.get(i)
-        if lbl and lbl.winfo_exists():
-            lbl.configure(text="no image", fg=MUTED)
-
-    def _pick_index(self, i):
-        prints = self.card.get("printings") or []
-        if 0 <= i < len(prints):
-            self._choose(prints[i])
-
-    def _choose(self, pr):
-        self.result = pr
-        self.on_pick(pr)
-        self.destroy()
-
-
 # ------------------------------------------------------------------- main app
 
 class App(tk.Tk):
@@ -446,7 +318,8 @@ class App(tk.Tk):
         self.print_head = tk.Label(det, text="", bg=BG, fg=MUTED,
                                    font=(UI_FONT, 9, "bold"), anchor="w")
         self.print_head.pack(fill="x", pady=(12, 2))
-        self.print_strip = tk.Frame(det, bg=BG, height=PRINT_H + 22)
+        self.print_strip = tk.Frame(det, bg=BG,
+                                    height=(PRINT_H + 24) * PRINT_ROWS)
         self.print_strip.pack(fill="x")
         self.print_strip.pack_propagate(False)
         self._print_tiles = []
@@ -575,22 +448,39 @@ class App(tk.Tk):
                  + ("chosen by artwork - click to change"
                     if by_art else "click to choose"))
 
-        row = tk.Frame(self.print_strip, bg=BG)
-        row.pack(fill="both", expand=True)
-        for i, pr in enumerate(prints[:MAX_PRINT_TILES]):
-            self._add_printing_tile(row, i, pr, ranked)
-        if len(prints) > MAX_PRINT_TILES:
-            tk.Label(row, text=f"+{len(prints)-MAX_PRINT_TILES}", bg=BG,
-                     fg=MUTED, font=(UI_FONT, 9)).pack(side="left", padx=4)
+        # Every printing is reachable. Capping the list and showing "+4" left
+        # the rest unreachable once the pop-up window was removed.
+        canvas = tk.Canvas(self.print_strip, bg=BG, highlightthickness=0)
+        bar = ttk.Scrollbar(self.print_strip, orient="vertical",
+                            command=canvas.yview)
+        grid = tk.Frame(canvas, bg=BG)
+        grid.bind("<Configure>",
+                  lambda e: canvas.configure(scrollregion=canvas.bbox("all")))
+        canvas.create_window((0, 0), window=grid, anchor="nw")
+        canvas.configure(yscrollcommand=bar.set)
+        canvas.pack(side="left", fill="both", expand=True)
+        if len(prints) > PRINT_COLS * PRINT_ROWS:
+            bar.pack(side="right", fill="y")
+            canvas.bind_all("<MouseWheel>", self._scroll_printings)
+            self._print_canvas = canvas
+
+        for i, pr in enumerate(prints):
+            cell = self._add_printing_tile(grid, i, pr, ranked)
+            cell.grid(row=i // PRINT_COLS, column=i % PRINT_COLS,
+                      padx=(0, 4), pady=(0, 4))
 
         threading.Thread(target=self._load_printing_thumbs,
-                         args=(prints[:MAX_PRINT_TILES],), daemon=True).start()
+                         args=(prints,), daemon=True).start()
+
+    def _scroll_printings(self, event):
+        canvas = getattr(self, "_print_canvas", None)
+        if canvas is not None and canvas.winfo_exists():
+            canvas.yview_scroll(int(-event.delta / 120), "units")
 
     def _add_printing_tile(self, parent, i, pr, ranked):
         code, num, _rarity = pr
         chosen = (code, num) == (self.printing[0], self.printing[1])
         cell = tk.Frame(parent, bg=ACCENT if chosen else EDGE, padx=2, pady=2)
-        cell.pack(side="left", padx=(0, 4))
         inner = tk.Frame(cell, bg=PANEL)
         inner.pack()
         hold = tk.Frame(inner, width=PRINT_W, height=PRINT_H, bg=PANEL)
@@ -607,6 +497,7 @@ class App(tk.Tk):
         for w in (cell, inner, hold, lbl):
             w.bind("<Button-1>", lambda e, p=pr: self._choose_printing(p))
         self._print_tiles.append(lbl)
+        return cell
 
     def _load_printing_thumbs(self, prints):
         for i, (code, num, _r) in enumerate(prints):

@@ -255,6 +255,56 @@ LANG_LABEL = {"zhs": "S-Chinese", "zht": "T-Chinese", "ja": "Japanese",
               "pt": "Portuguese"}
 
 
+# A name match below this is noise, not a reading. Orientation must not be
+# decided by it: an upside-down card yields garbage that still fuzzy-matches
+# something, and on a card whose name is not in Latin script that garbage would
+# otherwise beat the correct orientation, which reads nothing at all.
+NAME_TRUST = 0.72
+
+
+def read_name(card_img, ocr, index, tmpdir, info=None):
+    """Read the card's name, trying both orientations and both scripts.
+
+    Orientation is settled by whichever attempt actually recognises a card, not
+    by whichever produced any text. That distinction matters: the English
+    recogniser returns nothing at all from a Chinese card, so a weak accidental
+    match on the flipped image used to win, and every later step then worked on
+    an upside-down picture.
+    """
+    attempts = []
+    for rot in (0, 180):
+        view = card_img if rot == 0 else card_img.transpose(Image.ROTATE_180)
+        r = carddetect.regions((0, 0, view.width, view.height))
+        crop = enlarge(view.crop(r["name"]), 120)
+        if crop is None:
+            continue
+        res = ocr_image(crop, ocr, tmpdir)
+        lines = res.get("lines", [])
+        cand = match_lines(lines, index)
+        attempts.append({"score": cand["score"] if cand else 0.0,
+                         "guess": cand, "lines": lines, "view": view,
+                         "regions": r, "rot": rot})
+    if not attempts:
+        return None
+
+    best = max(attempts, key=lambda a: a["score"])
+    if best["score"] >= NAME_TRUST:
+        return best
+
+    # Nothing convincing in English. The name may be in another script, so try
+    # every orientation again with the other recognisers - including the one
+    # the English pass scored lowest, which is often the right way up.
+    for attempt in attempts:
+        foreign = try_foreign_name(attempt["view"], ocr, index, tmpdir)
+        if foreign and foreign["score"] > best["score"]:
+            best = dict(attempt)
+            best.update(score=foreign["score"], guess=foreign)
+            if info is not None:
+                info["resolved_by"] = "localised name"
+                info["language"] = foreign.get("language")
+    return best
+
+
 def try_foreign_name(view, ocr, index, tmpdir):
     """Re-read the name bar with non-English recognisers."""
     regions = carddetect.regions((0, 0, view.width, view.height))
@@ -492,37 +542,10 @@ def recognise(img, ocr, index, tmpdir, verbose=False):
 
     if box:
         card_img = full.crop(box)
-        # a card dropped under the camera lands either way up, so try both and
-        # keep whichever reads better
-        best = None
-        for rot in (0, 180):
-            view = card_img if rot == 0 else card_img.transpose(Image.ROTATE_180)
-            r = carddetect.regions((0, 0, view.width, view.height))
-            crop = enlarge(view.crop(r["name"]), 120)
-            if crop is None:
-                continue
-            res = ocr_image(crop, ocr, tmpdir)
-            lines = res.get("lines", [])
-            cand = match_lines(lines, index)
-            score = cand["score"] if cand else 0.0
-            if best is None or score > best["score"]:
-                best = {"score": score, "guess": cand, "lines": lines,
-                        "view": view, "regions": r, "rot": rot}
-
+        best = read_name(card_img, ocr, index, tmpdir, info)
         guess = best["guess"] if best else None
         info["rotated"] = bool(best and best["rot"])
         info["name_lines"] = best["lines"] if best else []
-
-        # When the name did not read cleanly, read the rest of the card and let
-        # the rules text vote. Only done when needed, so a clean read stays fast.
-        # A name printed in another script will not match the English index at
-        # all, so re-read the name bar with a recogniser for that script.
-        if best and (not guess or guess["score"] < 0.80):
-            foreign = try_foreign_name(best["view"], ocr, index, tmpdir)
-            if foreign and (not guess or foreign["score"] > guess["score"]):
-                guess = foreign
-                info["resolved_by"] = "localised name"
-                info["language"] = foreign.get("language")
 
         candidates = (guess or {}).get("candidates") or []
         if best and guess and needs_body_check(candidates):
