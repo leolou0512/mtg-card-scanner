@@ -1,0 +1,18 @@
+# Core dependencies, both platforms.
+pillow>=9.0
+numpy>=1.20
+scipy>=1.7
+
+# macOS only: reaches Apple's built-in Vision OCR. Nothing large is downloaded;
+# the framework already ships with the system.
+pyobjc-framework-Vision>=9.0 ; sys_platform == "darwin"
+pyobjc-framework-Quartz>=9.0 ; sys_platform == "darwin"
+
+# Optional fallback OCR for Linux, or a Mac without pyobjc. Needs the tesseract
+# binary as well: brew install tesseract / apt install tesseract-ocr
+# pytesseract>=0.3.10
+
+# tkinter is part of the standard library but is packaged separately on some
+# systems:
+#   macOS   brew install python-tk
+#   Linux   apt install python3-tk

@@ -1,0 +1,20 @@
+# Normalise line endings so the same checkout works on Windows and macOS.
+* text=auto
+
+# Shell scripts must keep LF. A .command file with CRLF fails on macOS with a
+# baffling "command not found", because the carriage return is treated as part
+# of the command name.
+*.command text eol=lf
+*.sh      text eol=lf
+
+# PowerShell is happier with CRLF and only ever runs on Windows.
+*.ps1 text eol=crlf
+
+# Python is fine either way; LF keeps diffs consistent across machines.
+*.py text eol=lf
+
+# Never touch these.
+*.pkl binary
+*.jpg binary
+*.png binary
+*.xz  binary

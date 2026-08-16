@@ -1,0 +1,46 @@
+# ------------------------------------------------------------- inventory
+# What this tool produces belongs to you, not to this repository. By default it
+# is written to inventory/; point scanner/config.json at your private
+# inventory repo instead and nothing lands here at all.
+#
+# Cardmarket shipment exports in particular carry the names and full postal
+# addresses of buyers and sellers - real people. Never commit those.
+inventory/
+collection_log.csv
+collection_log.csv.bak
+rejects.csv
+rejects/
+data/
+
+# machine-specific: cache location, inventory location, last phone address
+scanner/config.json
+scanner/.cache_path
+scanner/.catalogue.json
+
+# ------------------------------------------------------------- generated
+# 14 MB binary, rebuilt from Scryfall in about three minutes:
+#     python scanner/carddb.py --update
+# Committing it would add its full size to history on every rebuild.
+scanner/index.pkl
+scanner/index.pkl.backup
+
+# card images, price data and artwork hashes - up to 20 GB, kept outside the
+# project entirely. Rebuild with scanner/setup_data.py
+cache/
+arthash.pkl
+localised.pkl
+bulk_meta.pkl
+
+# ---------------------------------------------------------------- python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.env
+
+# ------------------------------------------------------------------- junk
+*.bak
+*.tmp
+.DS_Store
+Thumbs.db
