@@ -4,6 +4,7 @@ Designed for OCR output: tolerant of wrong characters, missing letters and
 joined-up words. Trigram prefilter narrows 37k names to a few dozen, then a
 sequence match ranks those. Pure standard library.
 """
+import heapq
 import os
 import pickle
 import re
@@ -171,7 +172,13 @@ class CardIndex:
         return [(self.cards[i], min(r, 0.999)) for r, i in scored[:limit]]
 
     def prefix(self, text, limit=9):
-        """Type-ahead: names starting with `text`, then names containing it."""
+        """Type-ahead: names starting with `text`, then names containing it.
+
+        Within each group the most reprinted cards come first. Sorting by name
+        length instead buried the cards anyone is actually likely to be holding
+        - typing 'light' offered seven obscure commons before Lightning Bolt,
+        because they happen to have shorter names.
+        """
         q = normalise(text)
         if not q:
             return []
@@ -182,11 +189,20 @@ class CardIndex:
                 starts.append(c)
             elif q in n:
                 contains.append(c)
-            if len(starts) >= limit and len(contains) >= limit:
-                break
-        starts.sort(key=lambda c: (len(c["norm"]), c["norm"]))
-        contains.sort(key=lambda c: (len(c["norm"]), c["norm"]))
-        return (starts + contains)[:limit]
+
+        def rank(c):
+            return (c["norm"] != q,                   # an exact name wins
+                    -len(c.get("printings") or ()),   # then how often reprinted
+                    len(c["norm"]), c["norm"])
+
+        # a two-letter query can match thousands; only the first few are wanted,
+        # so pick them rather than sorting the lot
+        head = heapq.nsmallest(limit, starts, key=rank)
+        tail = heapq.nsmallest(limit, contains, key=rank)
+        # always keep a few rows for names that merely contain the query, or
+        # 'bolt' would fill up with Bolt Bend and never reach Lightning Bolt
+        keep = min(3, len(tail))
+        return (head[:limit - keep] + tail)[:limit]
 
 
 # ------------------------------------------------------- non-English names

@@ -6,8 +6,8 @@ for everything.
 
     python gui.py
 
-Accepted cards append to collection_log.csv; rejected ones to rejects.csv with
-a photo saved for later hand-cataloguing.
+Anything the camera cannot read can be typed instead: FIND BY NAME searches
+every card name as you type. Accepted cards append to collection_log.csv.
 """
 import csv
 import io
@@ -20,7 +20,7 @@ import tempfile
 import threading
 import time
 import tkinter as tk
-from datetime import date, datetime
+from datetime import date
 from tkinter import messagebox, ttk
 
 from PIL import Image, ImageTk
@@ -37,14 +37,10 @@ ROOT = paths.PROJECT
 UI_FONT = paths.ui_font()
 MONO_FONT = paths.mono_font()
 LOG = os.path.join(ROOT, "collection_log.csv")
-REJECTS = os.path.join(ROOT, "rejects.csv")
-REJECT_DIR = os.path.join(ROOT, "rejects")
 CONFIG = os.path.join(HERE, ".catalogue.json")
 
 LOG_HEADER = ["date", "action", "name", "set", "set_name", "number", "rarity",
               "language", "foil", "qty", "source", "note"]
-REJECT_HEADER = ["timestamp", "reason", "best_guess", "score", "set", "number",
-                 "ocr_text", "photo"]
 
 BG = "#16181d"
 PANEL = "#1e2128"
@@ -59,9 +55,20 @@ BAD = "#ff6b6b"
 CARD_W, CARD_H = 400, 558        # reference pane, 63x88 proportions
 VIDEO_W, VIDEO_H = 400, 558      # matched, so the two cards compare directly
 REF_VERSION = "large"            # 672x936 from Scryfall, sharper than 'normal'
-PRINT_W, PRINT_H = 74, 103       # printing thumbnails, same proportions
-PRINT_COLS = 4                   # fits the details column
-PRINT_ROWS = 2                   # visible without scrolling; more scroll
+# Printings get their own column rather than a strip under the details, so the
+# thumbnails can be large enough to tell two treatments apart by eye.
+PRINT_W, PRINT_H = 124, 173      # same 63x88 proportions
+PRINT_COLS = 2
+PRINT_PANE_W = 300
+DETAIL_W = 340                   # fixed, so the window never resizes itself
+
+# Offered when the card's own language cannot be read, and for hand-entered
+# cards, where there is nothing to read at all.
+LANGUAGES = ["English", "Japanese", "S-Chinese", "T-Chinese", "Korean",
+             "Russian", "German", "French", "Italian", "Spanish",
+             "Portuguese"]
+
+SEARCH_HITS = 10                 # rows in the type-ahead list
 
 
 # --------------------------------------------------------------------- config
@@ -197,6 +204,12 @@ def placeholder(w, h, text, colour=EDGE):
     return im
 
 
+def _ellipsis(text, n):
+    """Trim to n characters, marking that something was cut."""
+    text = text or ""
+    return text if len(text) <= n else text[:n - 1] + "…"
+
+
 # ------------------------------------------------------------------- main app
 
 class App(tk.Tk):
@@ -222,14 +235,20 @@ class App(tk.Tk):
         self.frozen = False
         self.scan_busy = False
         self.accepted = 0
-        self.rejected = 0
         self.data = None
+        self._print_cells = []
+        self._print_canvas = None
+        self._print_token = 0
 
         self.foil = tk.BooleanVar(value=False)
         self.qty = tk.IntVar(value=1)
+        # sticky between cards: a box of Japanese cards stays Japanese unless
+        # a scan actually reads a different language off the collector line
+        self.language = tk.StringVar(value="English")
 
         self._photo_video = None
         self._photo_card = None
+        self._search_hits = []
 
         self._build()
         self._bind_keys()
@@ -288,16 +307,19 @@ class App(tk.Tk):
 
         # details
         det = tk.Frame(top, bg=BG)
-        det.grid(row=0, column=2, sticky="nsew")
-        top.grid_columnconfigure(2, weight=1)
+        det.grid(row=0, column=2, sticky="nsew", padx=(0, 10))
+        # Pins the column width, so the window does not grow and shrink around
+        # it as card names change length. Every label below wraps inside this,
+        # so the column never asks for more than the spacer.
+        tk.Frame(det, bg=BG, width=DETAIL_W, height=1).pack()
 
         self.name_lbl = tk.Label(det, text="Ready", bg=BG, fg=FG,
                                  font=(UI_FONT, 19, "bold"), anchor="w",
-                                 wraplength=330, justify="left")
+                                 wraplength=DETAIL_W - 10, justify="left")
         self.name_lbl.pack(fill="x", pady=(2, 2))
         self.set_lbl = tk.Label(det, text="", bg=BG, fg=ACCENT,
                                 font=(UI_FONT, 11), anchor="w",
-                                wraplength=330, justify="left")
+                                wraplength=DETAIL_W - 10, justify="left")
         self.set_lbl.pack(fill="x")
         self.meta_lbl = tk.Label(det, text="", bg=BG, fg=MUTED,
                                  font=(UI_FONT, 10), anchor="w", justify="left")
@@ -310,20 +332,10 @@ class App(tk.Tk):
         self.conf_lbl.pack(fill="x", pady=(10, 0))
         self.warn_lbl = tk.Label(det, text="", bg=BG, fg=WARN,
                                  font=(UI_FONT, 10, "bold"), anchor="w",
-                                 wraplength=330, justify="left")
+                                 wraplength=DETAIL_W - 10, justify="left")
         self.warn_lbl.pack(fill="x", pady=(8, 0))
 
-        # Printings live here rather than in a pop-up window: they are part of
-        # verifying the card, so they belong on screen beside it.
-        self.print_head = tk.Label(det, text="", bg=BG, fg=MUTED,
-                                   font=(UI_FONT, 9, "bold"), anchor="w")
-        self.print_head.pack(fill="x", pady=(12, 2))
-        self.print_strip = tk.Frame(det, bg=BG,
-                                    height=(PRINT_H + 24) * PRINT_ROWS)
-        self.print_strip.pack(fill="x")
-        self.print_strip.pack_propagate(False)
-        self._print_tiles = []
-        self._print_photos = []
+        self._build_search(det)
 
         opts = tk.Frame(det, bg=BG)
         opts.pack(fill="x", pady=(10, 0))
@@ -352,6 +364,31 @@ class App(tk.Tk):
         tk.Label(opts, text="quantity  -  or press 1-9", bg=BG, fg=MUTED,
                  font=(UI_FONT, 8)).pack(anchor="w")
 
+        # The card's own language is only readable when the collector line is,
+        # which is exactly what fails on the cards that need it most.
+        lang_row = tk.Frame(opts, bg=BG)
+        lang_row.pack(fill="x", pady=(8, 0))
+        tk.Label(lang_row, text="Language", bg=BG, fg=MUTED,
+                 font=(UI_FONT, 9)).pack(side="left")
+        self.lang_box = ttk.Combobox(lang_row, values=LANGUAGES, state="readonly",
+                                     textvariable=self.language, width=12,
+                                     font=(UI_FONT, 10))
+        self.lang_box.pack(side="right", fill="x", expand=True, padx=(8, 0))
+        self.lang_box.bind("<<ComboboxSelected>>", self._on_language)
+        style.configure("TCombobox", fieldbackground=PANEL, background=PANEL,
+                        foreground=FG, arrowcolor=FG, borderwidth=0)
+        style.map("TCombobox",
+                  fieldbackground=[("readonly", PANEL)],
+                  foreground=[("readonly", FG)],
+                  selectbackground=[("readonly", PANEL)],
+                  selectforeground=[("readonly", FG)])
+        # the drop-down is a plain Tk listbox and only takes option-database
+        # colours, which have to be set before it is first opened
+        self.option_add("*TCombobox*Listbox.background", PANEL)
+        self.option_add("*TCombobox*Listbox.foreground", FG)
+        self.option_add("*TCombobox*Listbox.selectBackground", ACCENT)
+        self.option_add("*TCombobox*Listbox.selectForeground", "#10131a")
+
         # Actions sit directly under the controls they follow, so the mouse
         # never leaves this column: adjust foil or quantity, then accept.
         tk.Frame(opts, bg=EDGE, height=1).pack(fill="x", pady=(14, 10))
@@ -359,23 +396,38 @@ class App(tk.Tk):
         self.scan_btn = self._button(opts, "SCAN   (Space)", self.do_scan,
                                      ACCENT, 10)
         self.scan_btn.pack(fill="x", ipady=6)
+        self.accept_btn = self._button(opts, "ACCEPT   (A)", self.do_accept,
+                                       OK, 10)
+        self.accept_btn.pack(fill="x", pady=(6, 0), ipady=6)
 
         decide = tk.Frame(opts, bg=BG)
         decide.pack(fill="x", pady=(6, 0))
         decide.grid_columnconfigure(0, weight=1)
         decide.grid_columnconfigure(1, weight=1)
-        self.accept_btn = self._button(decide, "Accept  (A)", self.do_accept,
-                                       OK, 8)
-        self.accept_btn.grid(row=0, column=0, sticky="ew", padx=(0, 3), ipady=4)
-        self.reject_btn = self._button(decide, "Reject  (R)", self.do_reject,
-                                       BAD, 8)
-        self.reject_btn.grid(row=0, column=1, sticky="ew", padx=(3, 0), ipady=4)
         self.retry_btn = self._button(decide, "Retry  (T)", self.do_retry,
                                       WARN, 8)
-        self.retry_btn.grid(row=1, column=0, sticky="ew", padx=(0, 3),
-                            pady=(6, 0), ipady=4)
+        self.retry_btn.grid(row=0, column=0, sticky="ew", padx=(0, 3), ipady=4)
         self._button(decide, "Edit last  (E)", self.do_edit_last, PANEL, 8).grid(
-            row=1, column=1, sticky="ew", padx=(3, 0), pady=(6, 0), ipady=4)
+            row=0, column=1, sticky="ew", padx=(3, 0), ipady=4)
+
+        # printings, in a column of their own so the thumbnails can be big
+        # enough to tell two treatments apart without opening anything
+        pr = tk.Frame(top, bg=PANEL, highlightbackground=EDGE,
+                      highlightthickness=1, width=PRINT_PANE_W)
+        pr.grid(row=0, column=3, sticky="ns")
+        # pack, not grid: its children are packed, and grid_propagate would
+        # have left the width free to drift
+        pr.pack_propagate(False)
+        self.print_head = tk.Label(pr, text="PRINTINGS", bg=PANEL, fg=MUTED,
+                                   font=(UI_FONT, 9, "bold"), anchor="w",
+                                   wraplength=PRINT_PANE_W - 20, justify="left")
+        self.print_head.pack(fill="x", padx=10, pady=(8, 4))
+        self.print_strip = tk.Frame(pr, bg=PANEL)
+        self.print_strip.pack(fill="both", expand=True, padx=(10, 4),
+                              pady=(0, 10))
+        self._print_tiles = []
+        self._print_photos = []
+        self._print_canvas = None
 
         # secondary, kept out of the way of the scanning rhythm
         foot = tk.Frame(self, bg=BG)
@@ -415,13 +467,140 @@ class App(tk.Tk):
     def _refresh_qty(self):
         self.qty_lbl.configure(text=str(self.qty.get()))
 
+    # ------------------------------------------------------- find by hand
+    def _build_search(self, parent):
+        """Type-ahead over every card name, for cards the camera cannot read.
+
+        A Japanese or Korean name is not in the English index at all, and if the
+        collector line is worn or glared out there is nothing left to match on.
+        Typing the English name is then the only way in, so it has to be here on
+        the main page rather than behind a dialog.
+        """
+        box = tk.Frame(parent, bg=BG)
+        box.pack(fill="x", pady=(14, 0))
+        tk.Label(box, text="FIND BY NAME", bg=BG, fg=MUTED,
+                 font=(UI_FONT, 9, "bold"), anchor="w").pack(fill="x")
+
+        self.search_row = tk.Frame(box, bg=BG)
+        self.search_row.pack(fill="x", pady=(2, 0))
+        self.search_var = tk.StringVar()
+        self.search = tk.Entry(self.search_row, textvariable=self.search_var,
+                               font=(UI_FONT, 13), bg=PANEL, fg=FG,
+                               insertbackground=FG, relief="flat")
+        self.search.pack(side="left", fill="x", expand=True, ipady=6)
+        tk.Button(self.search_row, text="x", command=self._clear_search,
+                  bg=PANEL, fg=MUTED, relief="flat", padx=8,
+                  font=(UI_FONT, 10, "bold")).pack(side="left")
+        tk.Label(box, text="type a few letters, then click or press Enter",
+                 bg=BG, fg=MUTED, font=(UI_FONT, 8), anchor="w").pack(fill="x")
+
+        # floats over whatever is beneath it, so the buttons below never move
+        self.search_list = tk.Listbox(
+            parent, bg=PANEL, fg=FG, font=(UI_FONT, 11), relief="flat",
+            highlightthickness=1, highlightbackground=ACCENT,
+            selectbackground=ACCENT, selectforeground="#10131a",
+            activestyle="none", exportselection=False, height=1)
+
+        self.search_var.trace_add("write", lambda *a: self._on_search_typed())
+        self.search.bind("<Down>", self._search_down)
+        self.search.bind("<Up>", self._search_up)
+        self.search.bind("<Return>", self._search_take)
+        self.search.bind("<Escape>", lambda e: self._clear_search())
+        self.search_list.bind("<Return>", self._search_take)
+        self.search_list.bind("<ButtonRelease-1>", self._search_take)
+        self.search_list.bind("<Escape>", lambda e: self._clear_search())
+
+    def _on_search_typed(self):
+        text = self.search_var.get().strip()
+        if len(text) < 2:
+            self._hide_search_list()
+            return
+        self._search_hits = self.index.prefix(text, limit=SEARCH_HITS)
+        fuzzy = False
+        if not self._search_hits:
+            # a typo should not come back empty when the same fuzzy matcher
+            # that reads the camera can see straight through it
+            self._search_hits = [c for c, s in
+                                 self.index.lookup(text, limit=SEARCH_HITS)
+                                 if s >= 0.55]
+            fuzzy = bool(self._search_hits)
+        if not self._search_hits:
+            self._hide_search_list()
+            self.search.configure(fg=BAD)
+            return
+        self.search.configure(fg=WARN if fuzzy else FG)
+        self.search_list.delete(0, "end")
+        for card in self._search_hits:
+            n = len(card.get("printings") or [])
+            self.search_list.insert("end", f"  {card['name']}   ({n})")
+        self.search_list.configure(height=len(self._search_hits))
+        self.search_list.place(in_=self.search_row, relx=0, rely=1.0, y=3,
+                               relwidth=1.0, anchor="nw")
+        self.search_list.lift()
+
+    def _hide_search_list(self):
+        self._search_hits = []
+        self.search_list.place_forget()
+
+    def _clear_search(self):
+        self.search_var.set("")
+        self.search.configure(fg=FG)
+        self._hide_search_list()
+
+    def _search_move(self, delta):
+        if not self._search_hits:
+            return
+        cur = self.search_list.curselection()
+        i = (cur[0] + delta) if cur else (0 if delta > 0 else len(self._search_hits) - 1)
+        i = max(0, min(len(self._search_hits) - 1, i))
+        self.search_list.selection_clear(0, "end")
+        self.search_list.selection_set(i)
+        self.search_list.see(i)
+
+    def _search_down(self, _e):
+        self._search_move(1)
+        return "break"
+
+    def _search_up(self, _e):
+        self._search_move(-1)
+        return "break"
+
+    def _search_take(self, _e=None):
+        """Take the highlighted match, or the first one if none is highlighted."""
+        if not self._search_hits:
+            return "break"
+        cur = self.search_list.curselection()
+        i = cur[0] if cur else 0
+        if i < len(self._search_hits):
+            self._use_card(self._search_hits[i])
+        return "break"
+
+    def _use_card(self, card):
+        """Show a hand-picked card exactly as a scanned one, ready to accept."""
+        self._clear_search()
+        # off the entry, so Enter accepts and 1-9 set the quantity again
+        self.focus_set()
+        self.card = card
+        self.guess = None
+        self.info = {"manual": True, "language": self.language.get()}
+        self.confirmed = False
+        self.data = None
+        self.printing = scan.pick_printing(card, None, None)
+        self._set_buttons(scanned=self.last_full is not None, matched=True)
+        self._refresh_details()
+        self._refresh_printings()
+        self._load_card_visual()
+
     # ------------------------------------------------- printings, shown inline
     def _clear_printings(self):
         for w in self.print_strip.winfo_children():
             w.destroy()
         self._print_tiles = []
+        self._print_cells = []
         self._print_photos = []
-        self.print_head.configure(text="")
+        self._print_canvas = None
+        self._print_token = getattr(self, "_print_token", 0) + 1
+        self.print_head.configure(text="PRINTINGS")
 
     def _refresh_printings(self):
         """Show every printing of the current card as a clickable thumbnail.
@@ -429,11 +608,15 @@ class App(tk.Tk):
         Ordered by how well the artwork matches the photo when that is known,
         so the most likely printing is first rather than whichever happens to
         sort first alphabetically.
+
+        Rebuilt only when the card changes. Choosing a printing repaints the
+        tiles instead, because rebuilding threw the list back to the top and
+        made picking anything below the fold a fight.
         """
         self._clear_printings()
         card = self.card
         prints = (card.get("printings") or []) if card else []
-        if len(prints) < 2:
+        if not prints:
             return
 
         ranked = (self.info or {}).get("art_printings") or []
@@ -443,71 +626,128 @@ class App(tk.Tk):
                             key=lambda p: order.get((p[0].upper(), p[1]), 999))
 
         by_art = self.info.get("printing_by") == "artwork"
+        plural = "PRINTING" if len(prints) == 1 else "PRINTINGS"
         self.print_head.configure(
-            text=f"{len(prints)} PRINTINGS   "
-                 + ("chosen by artwork - click to change"
-                    if by_art else "click to choose"))
+            text=f"{len(prints)} {plural}"
+                 + ("   chosen by artwork - click to change" if by_art
+                    else "   click to choose" if len(prints) > 1 else ""))
 
         # Every printing is reachable. Capping the list and showing "+4" left
         # the rest unreachable once the pop-up window was removed.
-        canvas = tk.Canvas(self.print_strip, bg=BG, highlightthickness=0)
+        canvas = tk.Canvas(self.print_strip, bg=PANEL, highlightthickness=0,
+                           width=PRINT_COLS * (PRINT_W + 9))
         bar = ttk.Scrollbar(self.print_strip, orient="vertical",
                             command=canvas.yview)
-        grid = tk.Frame(canvas, bg=BG)
+        grid = tk.Frame(canvas, bg=PANEL)
         grid.bind("<Configure>",
                   lambda e: canvas.configure(scrollregion=canvas.bbox("all")))
         canvas.create_window((0, 0), window=grid, anchor="nw")
         canvas.configure(yscrollcommand=bar.set)
         canvas.pack(side="left", fill="both", expand=True)
-        if len(prints) > PRINT_COLS * PRINT_ROWS:
-            bar.pack(side="right", fill="y")
-            canvas.bind_all("<MouseWheel>", self._scroll_printings)
-            self._print_canvas = canvas
+        bar.pack(side="right", fill="y")
+        canvas.bind_all("<MouseWheel>", self._scroll_printings)
+        self._print_canvas = canvas
 
         for i, pr in enumerate(prints):
             cell = self._add_printing_tile(grid, i, pr, ranked)
             cell.grid(row=i // PRINT_COLS, column=i % PRINT_COLS,
-                      padx=(0, 4), pady=(0, 4))
+                      padx=(0, 5), pady=(0, 5), sticky="n")
 
+        self._highlight_printings()
         threading.Thread(target=self._load_printing_thumbs,
-                         args=(prints,), daemon=True).start()
+                         args=(prints, self._print_token), daemon=True).start()
 
     def _scroll_printings(self, event):
-        canvas = getattr(self, "_print_canvas", None)
-        if canvas is not None and canvas.winfo_exists():
-            canvas.yview_scroll(int(-event.delta / 120), "units")
+        """Wheel over the printings pane only.
+
+        The binding is global - Windows delivers wheel events to whatever has
+        focus, not to what the pointer is over - so the pane has to check for
+        itself, or the wheel would scroll printings while you were in the
+        history table.
+        """
+        canvas = self._print_canvas
+        if canvas is None or not canvas.winfo_exists():
+            return
+        under = self.winfo_containing(event.x_root, event.y_root)
+        while under is not None:
+            if under is self.print_strip:
+                canvas.yview_scroll(int(-event.delta / 120), "units")
+                return
+            under = getattr(under, "master", None)
 
     def _add_printing_tile(self, parent, i, pr, ranked):
-        code, num, _rarity = pr
-        chosen = (code, num) == (self.printing[0], self.printing[1])
-        cell = tk.Frame(parent, bg=ACCENT if chosen else EDGE, padx=2, pady=2)
-        inner = tk.Frame(cell, bg=PANEL)
+        code, num, rarity = pr
+        cell = tk.Frame(parent, bg=EDGE, padx=2, pady=2)
+        inner = tk.Frame(cell, bg=PANEL, width=PRINT_W)
         inner.pack()
         hold = tk.Frame(inner, width=PRINT_W, height=PRINT_H, bg=PANEL)
         hold.pack_propagate(False)
         hold.pack()
         lbl = tk.Label(hold, bg=PANEL, text="...", fg=MUTED, font=(UI_FONT, 8))
         lbl.pack(expand=True)
+
+        # The set is what actually distinguishes printings; a bare collector
+        # number says nothing about which release you are looking at. Long set
+        # names wrap onto a second line rather than being cut off, since the
+        # tail is often the part that tells two releases apart -
+        # "Modern Horizons 2" against "Modern Horizons 2 Retro Frame Cards".
+        set_lbl = tk.Label(inner, text=self.index.set_name(code) or code,
+                           bg=PANEL, fg=FG, font=(UI_FONT, 8, "bold"),
+                           anchor="w", justify="left", width=1, padx=3,
+                           wraplength=PRINT_W - 8)
+        set_lbl.pack(fill="x")
+
+        year = self.index.set_year(code)
+        tail = f"{code.upper()} #{num}"
+        if year:
+            tail += f"  {year}"
+        if rarity:
+            tail += f"  {rarity[:1].upper()}"
+        sub_lbl = tk.Label(inner, text=_ellipsis(tail, 21), bg=PANEL, fg=MUTED,
+                           font=(UI_FONT, 8), anchor="w", width=1, padx=3)
+        sub_lbl.pack(fill="x")
+
+        widgets = [cell, inner, hold, lbl, set_lbl, sub_lbl]
         dist = next((d for c, n, d in ranked
                      if (c.upper(), n) == (code.upper(), num)), None)
-        caption = f"#{num}" + ("" if dist is None else f"  {dist}")
-        tk.Label(inner, text=caption[:12], bg=PANEL,
-                 fg=FG if chosen else MUTED,
-                 font=(UI_FONT, 8, "bold" if chosen else "normal")).pack(fill="x")
-        for w in (cell, inner, hold, lbl):
+        if dist is not None:
+            art_lbl = tk.Label(inner, bg=PANEL, fg=ACCENT, font=(UI_FONT, 8),
+                               anchor="w", width=1, padx=3,
+                               text=f"art match {dist}")
+            art_lbl.pack(fill="x")
+            widgets.append(art_lbl)
+
+        for w in widgets:
             w.bind("<Button-1>", lambda e, p=pr: self._choose_printing(p))
         self._print_tiles.append(lbl)
+        self._print_cells.append((code, num, cell, set_lbl, sub_lbl))
         return cell
 
-    def _load_printing_thumbs(self, prints):
+    def _highlight_printings(self):
+        """Mark the chosen tile without rebuilding, so the list stays put."""
+        for code, num, cell, set_lbl, sub_lbl in self._print_cells:
+            if not cell.winfo_exists():
+                continue
+            chosen = (code, num) == (self.printing[0], self.printing[1])
+            cell.configure(bg=ACCENT if chosen else EDGE)
+            set_lbl.configure(fg="#10131a" if chosen else FG,
+                              bg=ACCENT if chosen else PANEL)
+            sub_lbl.configure(fg="#28313f" if chosen else MUTED,
+                              bg=ACCENT if chosen else PANEL)
+
+    def _load_printing_thumbs(self, prints, token):
         for i, (code, num, _r) in enumerate(prints):
+            if token != self._print_token:
+                return              # moved on to another card
             im = scryfall.card_image(code, num, version="small")
             if im is not None:
-                self.results.put(("thumb", (i, fit(im, PRINT_W, PRINT_H))))
+                self.results.put(("thumb", (token, i, fit(im, PRINT_W, PRINT_H))))
 
     def _on_thumb(self, payload):
-        i, im = payload
-        if i >= len(self._print_tiles) or im is None:
+        token, i, im = payload
+        if token != self._print_token or im is None:
+            return
+        if i >= len(self._print_tiles):
             return
         lbl = self._print_tiles[i]
         if not lbl.winfo_exists():
@@ -521,7 +761,7 @@ class App(tk.Tk):
         self.confirmed = True
         self.data = None
         self._refresh_details()
-        self._refresh_printings()
+        self._highlight_printings()
         self._load_card_visual()
 
     def _refresh_overlay(self):
@@ -553,28 +793,52 @@ class App(tk.Tk):
             activebackground=WARN if on else EDGE)
 
     def _button(self, parent, text, cmd, colour, size):
-        return tk.Button(parent, text=text, command=cmd, bg=colour, fg="#10131a",
+        # dark ink on the bright buttons, light ink on the dark ones - a fixed
+        # dark foreground left "Edit last" and "Update card database" almost
+        # unreadable against the panel colour
+        ink = FG if colour in (PANEL, EDGE, BG) else "#10131a"
+        return tk.Button(parent, text=text, command=cmd, bg=colour, fg=ink,
                          relief="flat", padx=size, pady=8,
                          font=(UI_FONT, 10, "bold"),
-                         activebackground=colour, activeforeground="#10131a",
+                         activebackground=EDGE if ink == FG else colour,
+                         activeforeground=ink,
                          disabledforeground="#5b6270")
 
     def _bind_keys(self):
-        self.bind("<space>", lambda e: self.do_scan())
-        self.bind("<Return>", lambda e: self.do_accept())
-        self.bind("a", lambda e: self.do_accept())
-        self.bind("r", lambda e: self.do_reject())
-        self.bind("t", lambda e: self.do_retry())
-        self.bind("e", lambda e: self.do_edit_last())
-        self.bind("p", lambda e: self.cycle_printing())
-        self.bind("f", lambda e: self._toggle_foil())
-        self.bind("q", lambda e: self._quit())
+        """Single-key shortcuts, suspended while typing.
+
+        Key events reach the toplevel after the widget has had them, so without
+        this guard typing 'a' into the search box would also accept the card.
+        """
+        def hotkey(fn):
+            def handler(_e):
+                w = self.focus_get()
+                if isinstance(w, (tk.Entry, tk.Listbox, tk.Text, ttk.Entry,
+                                  ttk.Combobox)):
+                    return
+                fn()
+            return handler
+
+        self.bind("<space>", hotkey(self.do_scan))
+        self.bind("<Return>", hotkey(self.do_accept))
+        self.bind("a", hotkey(self.do_accept))
+        self.bind("t", hotkey(self.do_retry))
+        self.bind("e", hotkey(self.do_edit_last))
+        self.bind("p", hotkey(self.cycle_printing))
+        self.bind("f", hotkey(self._toggle_foil))
+        self.bind("q", hotkey(self._quit))
+        self.bind("<Control-f>", lambda e: (self.search.focus_set(),
+                                            self.search.select_range(0, "end")))
         for n in range(1, 10):
-            self.bind(str(n), lambda e, n=n: self._set_qty(n))
+            self.bind(str(n), hotkey(lambda n=n: self._set_qty(n)))
 
     def _toggle_foil(self):
         self.foil.set(not self.foil.get())
         self._refresh_foil_btn()
+        self._refresh_details()
+
+    def _on_language(self, _e=None):
+        self.focus_set()            # give the shortcuts back
         self._refresh_details()
 
     def _set_qty(self, n):
@@ -734,13 +998,16 @@ class App(tk.Tk):
             self.price_lbl.configure(text="")
             self.conf_lbl.configure(text="")
             self.warn_lbl.configure(
-                text="Reposition or relight the card, then Retry (T).\n"
-                     "Reject (R) sets it aside for hand-cataloguing.")
+                text="Retry (T), or type the name in FIND BY NAME below.")
             self.card_lbl.configure(image="", text="no match", fg=MUTED)
             self._photo_card = None
+            self._clear_printings()
             self._set_buttons(scanned=full is not None, matched=False)
+            self.search.focus_set()
             return
 
+        if info.get("language"):
+            self.language.set(info["language"])
         self.printing = scan.pick_printing(card, info.get("number"),
                                            info.get("setcode"))
         self._set_buttons(scanned=True, matched=True)
@@ -813,8 +1080,8 @@ class App(tk.Tk):
         self.name_lbl.configure(text=card["name"], fg=FG)
         self.set_lbl.configure(
             text=f"{self.index.set_name(code)}  ({code} {self.index.set_year(code)})")
-        lang = info.get("language") or "English (assumed)"
-        self.meta_lbl.configure(text=f"#{num}   {rarity or '?'}   {lang}")
+        self.meta_lbl.configure(
+            text=f"#{num}   {rarity or '?'}   {self.language.get()}")
 
         price = scryfall.eur_price(self.data, self.foil.get())
         fin = scryfall.finishes(self.data)
@@ -824,12 +1091,17 @@ class App(tk.Tk):
         else:
             self.price_lbl.configure(text="")
 
-        score = self.guess["score"] if self.guess else 0
-        how = ("collector line" if info.get("resolved_by") == "collector"
-               else "card name")
-        self.conf_lbl.configure(
-            text=f"confidence {score:.2f}  -  matched on {how}\n"
-                 f"read as '{self.guess['text'] if self.guess else ''}'")
+        if info.get("manual"):
+            self.conf_lbl.configure(text="chosen by hand", fg=ACCENT)
+        else:
+            score = self.guess["score"] if self.guess else 0
+            how = ("collector line" if info.get("resolved_by") == "collector"
+                   else "artwork" if info.get("resolved_by") == "artwork"
+                   else "card name")
+            self.conf_lbl.configure(
+                text=f"confidence {score:.2f}  -  matched on {how}\n"
+                     f"read as '{self.guess['text'] if self.guess else ''}'",
+                fg=MUTED)
 
         warn = []
         prints = card.get("printings") or []
@@ -840,7 +1112,7 @@ class App(tk.Tk):
                      and not self.confirmed)
         if undecided:
             warn.append(f"Printing not certain - {len(prints)} exist, "
-                        f"pick one below")
+                        f"pick one on the right")
         if self.foil.get() and fin and "foil" not in fin:
             warn.append("Scryfall says this printing has no foil version")
         self.warn_lbl.configure(text="\n".join(warn))
@@ -848,12 +1120,10 @@ class App(tk.Tk):
 
     def _set_buttons(self, scanned, matched=False):
         self.accept_btn.configure(state="normal" if matched else "disabled")
-        self.reject_btn.configure(state="normal" if scanned else "disabled")
         self.retry_btn.configure(state="normal" if scanned else "disabled")
 
     def _update_counts(self):
-        self.count_lbl.configure(
-            text=f"accepted {self.accepted}    rejected {self.rejected}")
+        self.count_lbl.configure(text=f"accepted {self.accepted}")
 
     # --------------------------------------------------------------- printing
     def cycle_printing(self):
@@ -875,8 +1145,8 @@ class App(tk.Tk):
         append_csv(LOG, LOG_HEADER, [
             date.today().isoformat(), "+", self.card["name"], code or "",
             self.index.set_name(code) if code else "", num or "", rarity or "",
-            self.info.get("language") or "", "foil" if foil else "", qty,
-            "scan", "",
+            self.language.get(), "foil" if foil else "", qty,
+            "hand" if self.info.get("manual") else "scan", "",
         ])
         self.accepted += qty
         price = scryfall.eur_price(self.data, foil) or ""
@@ -887,29 +1157,6 @@ class App(tk.Tk):
         self._update_counts()
         self._set_qty(1)
         self._clear_card("accepted - place the next card")
-
-    def do_reject(self):
-        if self.last_full is None:
-            return
-        stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        os.makedirs(REJECT_DIR, exist_ok=True)
-        photo = os.path.join(REJECT_DIR, f"{stamp}.jpg")
-        try:
-            self.last_full.save(photo, quality=88)
-        except Exception:
-            photo = ""
-        append_csv(REJECTS, REJECT_HEADER, [
-            datetime.now().isoformat(timespec="seconds"),
-            "manual" if self.card else "unrecognised",
-            self.card["name"] if self.card else "",
-            f"{self.guess['score']:.2f}" if self.guess else "",
-            self.info.get("setcode") or "", self.info.get("number") or "",
-            self.guess["text"] if self.guess else "",
-            os.path.basename(photo),
-        ])
-        self.rejected += 1
-        self._update_counts()
-        self._clear_card("rejected - put that card aside")
 
     def _clear_card(self, message):
         self._unfreeze()
@@ -929,6 +1176,7 @@ class App(tk.Tk):
         self.card_overlay.configure(text="")
         self.card_overlay.lower()
         self._clear_printings()
+        self._clear_search()
         self._set_buttons(scanned=False)
 
     def do_update_carddb(self):

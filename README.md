@@ -133,14 +133,26 @@ Enter the address, then put a card under the camera and press **SCAN**.
 |---|---|
 | `Space` | scan the card under the camera |
 | `A` / `Enter` | accept and log it |
-| `R` | reject — sets it aside and saves a photo |
 | `T` | retry, without logging |
 | `P` | choose a different printing, shown as images |
 | `F` | toggle foil (stays on until turned off) |
 | `1`–`9` | quantity |
 | `E` | edit the last entry |
+| `Ctrl`+`F` | jump to the search box |
 
 Everything is also clickable.
+
+### When the camera cannot read a card
+
+Japanese, Korean and Chinese cards defeat the English recogniser, and a worn or
+glared collector line leaves nothing else to match on. Type the English name
+into **FIND BY NAME** instead: the list narrows with every character, and
+picking one loads that card exactly as if it had been scanned — same printing
+grid, same foil and quantity controls, same **ACCEPT**.
+
+Typos are fine; the same fuzzy matcher used on the camera's output handles the
+keyboard's. Set the **Language** dropdown before accepting, and it stays put for
+the rest of the box.
 
 ### Terminal version
 
@@ -153,7 +165,7 @@ Everything is also clickable.
 | What | Where |
 |---|---|
 | Your collection | `collection_log.csv` |
-| Rejected cards | `rejects.csv` + `rejects/` photos |
+| Cards rejected in the terminal version | `rejects.csv` + `rejects/` photos |
 | Cardmarket history | `data/` |
 | Card database index | `tools/index.pkl` |
 | Card images and prices | wherever `tools/config.json` points |
